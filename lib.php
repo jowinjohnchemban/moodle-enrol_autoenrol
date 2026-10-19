@@ -124,7 +124,7 @@ class enrol_autoenrol_plugin extends enrol_plugin {
     public function show_enrolme_link(stdClass $instance) {
         global $USER;
 
-        if ($this->get_config('loginenrol') && $instance->customint1 == 1) {
+        if ($this->get_config('loginenrol') && in_array($instance->customint1, [1, 3])) {
             // Don't offer enrol link if we are going to enrol them on login.
             return false;
         } else if ($this->enrol_allowed($instance, $USER)) {
@@ -415,7 +415,9 @@ class enrol_autoenrol_plugin extends enrol_plugin {
                 }
             }
 
-            if (!$found && (($this->get_config('loginenrol') && ($instance->customint1 == 1)) || !$onlogin)) {
+            // Instances enrolling on meeting conditions also enrol on login, so new users do not wait for the scheduled task.
+            $enrolonlogin = $this->get_config('loginenrol') && in_array($instance->customint1, [1, 3]);
+            if (!$found && ($enrolonlogin || !$onlogin)) {
                 // If user is not enrolled and this instance enrol on login or called with sync task, try to enrol.
                 if ($this->user_autoenrol($instance, $user)) {
                     if ($onlogin) {
@@ -1256,6 +1258,10 @@ class enrol_autoenrol_plugin extends enrol_plugin {
 
         // Enrol When.
         $options = $this->get_enrolmethod_options();
+        if (!has_capability('enrol/autoenrol:method', $context) && (($instance->customint1 ?? null) != 3)) {
+            // Enrolment on meeting conditions requires the method capability.
+            unset($options[3]);
+        }
         $mform->addElement('select', 'customint1', get_string('method', 'enrol_autoenrol'), $options);
         if (!has_capability('enrol/autoenrol:method', $context)) {
             $mform->disabledIf('customint1', 'customchar3', 'eq', '-');
@@ -1406,6 +1412,10 @@ class enrol_autoenrol_plugin extends enrol_plugin {
         $validlongtimenosee = array_keys($this->get_longtimenosee_options());
         $validgroupon = array_keys($this->get_groupon_options());
         $validyesno = [0, 1];
+        // Only users with the method capability may switch an instance to enrolment on meeting conditions.
+        if (!has_capability('enrol/autoenrol:method', $context) && (($instance->customint1 ?? null) != 3)) {
+            $validenrolmethod = array_diff($validenrolmethod, [3]);
+        }
         $tovalidate = [
             'name' => PARAM_TEXT,
             'status' => $validstatus,

@@ -153,6 +153,104 @@ final class enrol_matching_users_test extends \advanced_testcase {
     }
 
     /**
+     * Users not yet enrolled by the task are enrolled on login when login enrolments are allowed.
+     *
+     * @covers \enrol_autoenrol_plugin::sync_user_enrolments
+     */
+    public function test_login_enrols_matching_user_before_task_run(): void {
+        global $USER;
+
+        set_config('loginenrol', 1, 'enrol_autoenrol');
+
+        $generator = $this->getDataGenerator();
+        $course = $generator->create_course();
+        $instance = $this->add_instance($course, 3, 'Sales');
+
+        $this->setUser($generator->create_user(['department' => 'Sales']));
+        enrol_check_plugins($USER);
+
+        $this->assertTrue($this->is_enrolled_in($instance, $USER));
+    }
+
+    /**
+     * Users are not enrolled on login when login enrolments are not allowed.
+     *
+     * @covers \enrol_autoenrol_plugin::sync_user_enrolments
+     */
+    public function test_login_does_not_enrol_when_login_enrolments_disabled(): void {
+        global $USER;
+
+        set_config('loginenrol', 0, 'enrol_autoenrol');
+
+        $generator = $this->getDataGenerator();
+        $course = $generator->create_course();
+        $instance = $this->add_instance($course, 3, 'Sales');
+
+        $this->setUser($generator->create_user(['department' => 'Sales']));
+        enrol_check_plugins($USER);
+
+        $this->assertFalse($this->is_enrolled_in($instance, $USER));
+    }
+
+    /**
+     * Build submitted instance form data with the given "Enrol When" value.
+     *
+     * @param int $method Enrol when (customint1)
+     * @return array
+     */
+    private function get_instance_form_data(int $method): array {
+        global $DB;
+
+        return [
+            'name' => '',
+            'status' => ENROL_INSTANCE_ENABLED,
+            'roleid' => $DB->get_field('role', 'id', ['shortname' => 'student']),
+            'enrolperiod' => 0,
+            'expirynotify' => 0,
+            'expirythreshold' => 86400,
+            'enrolstartdate' => 0,
+            'enrolenddate' => 0,
+            'customint1' => $method,
+            'customint3' => 0,
+            'customint4' => 1,
+            'customint5' => 0,
+            'customint6' => 0,
+            'customint7' => 0,
+            'customint8' => 0,
+            'customchar1' => '',
+            'customchar3' => '-',
+            'availabilityconditionsjson' => '',
+        ];
+    }
+
+    /**
+     * Only users with enrol/autoenrol:method may switch an instance to enrolment on meeting conditions.
+     *
+     * @covers \enrol_autoenrol_plugin::edit_instance_validation
+     */
+    public function test_validation_requires_method_capability(): void {
+        $generator = $this->getDataGenerator();
+        $course = $generator->create_course();
+        $manager = $generator->create_and_enrol($course, 'manager');
+        $teacher = $generator->create_and_enrol($course, 'editingteacher');
+        $context = \context_course::instance($course->id);
+        $plugin = enrol_get_plugin('autoenrol');
+        $data = $this->get_instance_form_data(3);
+
+        $newinstance = (object)['id' => null, 'courseid' => $course->id, 'roleid' => $data['roleid'], 'customint1' => 0];
+        $this->setUser($teacher);
+        $this->assertArrayHasKey('customint1', $plugin->edit_instance_validation($data, [], $newinstance, $context));
+
+        $this->setUser($manager);
+        $this->assertSame([], $plugin->edit_instance_validation($data, [], $newinstance, $context));
+
+        // Teachers can keep the value set by a manager.
+        $instance = (object)['id' => 1, 'courseid' => $course->id, 'roleid' => $data['roleid'], 'customint1' => 3];
+        $this->setUser($teacher);
+        $this->assertSame([], $plugin->edit_instance_validation($data, [], $instance, $context));
+    }
+
+    /**
      * The task stops enrolling when the instance limit is reached.
      */
     public function test_task_respects_enrolment_limit(): void {
