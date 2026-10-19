@@ -63,6 +63,15 @@ class enrol_autoenrol_plugin extends enrol_plugin {
      * customtext2 => Conditional rule
      */
 
+    /** @var int Number of users loaded at once by sync_instance() */
+    const SYNC_BATCH_SIZE = 1000;
+
+    /** @var int Id of the instance being synchronised by sync_instance() */
+    private $syncinstanceid = 0;
+
+    /** @var \enrol_autoenrol\filter_info|null User filter of the instance being synchronised by sync_instance() */
+    private $syncfilterinfo = null;
+
     /**
      * Get enrol method icon
      *
@@ -277,7 +286,12 @@ class enrol_autoenrol_plugin extends enrol_plugin {
                 return false;
             }
 
-            $info = new \enrol_autoenrol\filter_info($instance);
+            if (($this->syncinstanceid == $instance->id) && !empty($this->syncfilterinfo)) {
+                // Reuse the filter built once by sync_instance().
+                $info = $this->syncfilterinfo;
+            } else {
+                $info = new \enrol_autoenrol\filter_info($instance);
+            }
             $information = '';
 
             return $info->is_available($information, false, $user->id);
@@ -490,26 +504,63 @@ class enrol_autoenrol_plugin extends enrol_plugin {
      * that meets the instance conditions gets enrolled.
      * Used by the enrol_matching_users scheduled task for instances that enrol on meeting conditions.
      *
+     * To keep the load low, when $since is given only users created, modified or logged in since then
+     * are processed, unless the instance itself changed or opened to new enrolments since then.
+     *
      * @param progress_trace $trace
      * @param stdClass       $instance enrol instance
+     * @param int            $since process only users changed since this timestamp, 0 means all users
      *
      * @return int number of new enrolments
      */
-    public function sync_instance(progress_trace $trace, stdClass $instance) {
-        global $CFG, $DB;
-
+    public function sync_instance(progress_trace $trace, stdClass $instance, $since = 0) {
         // We may need a lot of time here.
         core_php_time_limit::raise();
 
-        $trace->output("Synchronising autoenrol instance $instance->id in course $instance->courseid...");
+        $now = time();
+        if (($instance->timemodified >= $since) || (($instance->enrolstartdate > $since) && ($instance->enrolstartdate <= $now))) {
+            // Instance settings changed or new enrolments just opened, all users need to be checked.
+            $since = 0;
+        }
 
-        // First check that enrolled users still match the rule.
+        $mode = empty($since) ? 'all users' : 'users changed since ' . userdate($since);
+        $trace->output("Synchronising autoenrol instance $instance->id in course $instance->courseid ($mode)...");
+
+        // Build the user filter once for all users, see check_rule().
+        $this->syncinstanceid = $instance->id;
+        $this->syncfilterinfo = !empty($instance->customtext2) ? new \enrol_autoenrol\filter_info($instance) : null;
+        try {
+            $this->sync_instance_enrolled_users($instance, $since);
+            $enrolled = $this->sync_instance_new_users($trace, $instance, $since, $now);
+        } finally {
+            $this->syncinstanceid = 0;
+            $this->syncfilterinfo = null;
+        }
+
+        $trace->output("...$enrolled new enrolments.", 1);
+
+        return $enrolled;
+    }
+
+    /**
+     * Check that users enrolled with the instance still match the rule, see sync_instance().
+     *
+     * @param stdClass $instance enrol instance
+     * @param int      $since process only users changed since this timestamp, 0 means all users
+     *
+     * @return void
+     */
+    private function sync_instance_enrolled_users(stdClass $instance, $since) {
+        [$changedsql, $params] = $this->get_changed_users_sql($since);
+        $params['enrolid'] = $instance->id;
+
         $sql = "SELECT u.*, ue.id AS ueid, ue.status AS uestatus
                   FROM {user_enrolments} ue
                   JOIN {user} u ON u.id = ue.userid
-                 WHERE ue.enrolid = :enrolid AND u.deleted = 0";
-        $rs = $DB->get_recordset_sql($sql, ['enrolid' => $instance->id]);
-        foreach ($rs as $user) {
+                 WHERE ue.enrolid = :enrolid AND u.deleted = 0 AND u.id > :lastid
+                       $changedsql
+              ORDER BY u.id";
+        foreach ($this->get_users_in_batches($sql, $params) as $user) {
             $userenrolment = (object)['id' => $user->ueid, 'enrolid' => $instance->id, 'userid' => $user->id,
                                       'status' => $user->uestatus];
             unset($user->ueid, $user->uestatus);
@@ -517,10 +568,22 @@ class enrol_autoenrol_plugin extends enrol_plugin {
                 $this->sync_user_enrolment($instance, $user, $userenrolment);
             }
         }
-        $rs->close();
+    }
+
+    /**
+     * Enrol users that meet the instance conditions and are not enrolled yet, see sync_instance().
+     *
+     * @param progress_trace $trace
+     * @param stdClass       $instance enrol instance
+     * @param int            $since process only users changed since this timestamp, 0 means all users
+     * @param int            $now current time
+     *
+     * @return int number of new enrolments
+     */
+    private function sync_instance_new_users(progress_trace $trace, stdClass $instance, $since, $now) {
+        global $CFG, $DB;
 
         // Do not look for new users if instance is not accepting new enrolments.
-        $now = time();
         if (
             empty($instance->customint4) || ($instance->status != ENROL_INSTANCE_ENABLED) ||
             (!empty($instance->enrolstartdate) && ($instance->enrolstartdate > $now)) ||
@@ -532,50 +595,105 @@ class enrol_autoenrol_plugin extends enrol_plugin {
 
         $limit = (int)$instance->customint5;
         $count = $DB->count_records('user_enrolments', ['enrolid' => $instance->id]);
+        if ($limit > 0 && $count >= $limit) {
+            $trace->output('...enrolment limit reached.', 1);
+            return 0;
+        }
 
-        $params = ['guestid' => $CFG->siteguest, 'enrolid' => $instance->id];
-        $inactivesql = '';
+        // Exclude in the query as many users as possible that enrol_allowed() would refuse, so they are not checked one by one.
+        [$wheresql, $params] = $this->get_changed_users_sql($since);
+        $params += ['guestid' => $CFG->siteguest, 'enrolid' => $instance->id];
+        if (empty($instance->customint8)) {
+            // Users already enrolled with other methods are not enrolled.
+            [$enrolledsql, $enrolledparams] = get_enrolled_sql(context_course::instance($instance->courseid));
+            $wheresql .= " AND u.id NOT IN ($enrolledsql)";
+            $params += $enrolledparams;
+        }
         if (!empty($instance->customint3)) {
             // Do not enrol users that sync_expirations() would unenrol as inactive, they would be enrolled again on each run.
-            $inactivesql = "AND :now1 - u.lastaccess <= :longtimenosee1
-                            AND NOT EXISTS (SELECT 1
-                                              FROM {user_lastaccess} ul
-                                             WHERE ul.userid = u.id AND ul.courseid = :courseid
-                                                   AND :now2 - ul.timeaccess > :longtimenosee2)";
+            $wheresql .= " AND :now1 - u.lastaccess <= :longtimenosee1
+                           AND NOT EXISTS (SELECT 1
+                                             FROM {user_lastaccess} ul
+                                            WHERE ul.userid = u.id AND ul.courseid = :courseid
+                                                  AND :now2 - ul.timeaccess > :longtimenosee2)";
             $params += ['now1' => $now, 'now2' => $now, 'courseid' => $instance->courseid,
                         'longtimenosee1' => $instance->customint3, 'longtimenosee2' => $instance->customint3];
         }
 
-        // Now enrol all active users not yet enrolled with this instance that meet the conditions.
         $sql = "SELECT u.*
                   FROM {user} u
-                 WHERE u.deleted = 0 AND u.suspended = 0 AND u.confirmed = 1 AND u.id <> :guestid
+                 WHERE u.deleted = 0 AND u.suspended = 0 AND u.confirmed = 1 AND u.id <> :guestid AND u.id > :lastid
                        AND NOT EXISTS (SELECT 1
                                          FROM {user_enrolments} ue
                                         WHERE ue.userid = u.id AND ue.enrolid = :enrolid)
-                       $inactivesql
+                       $wheresql
               ORDER BY u.id";
-        $rs = $DB->get_recordset_sql($sql, $params);
         $enrolled = 0;
-        foreach ($rs as $user) {
-            if ($limit > 0 && $count >= $limit) {
-                $trace->output('...enrolment limit reached.', 1);
-                break;
-            }
+        foreach ($this->get_users_in_batches($sql, $params) as $user) {
             if (is_siteadmin($user)) {
                 continue;
             }
-            if ($this->user_autoenrol($instance, $user)) {
+            try {
+                $isenrolled = $this->user_autoenrol($instance, $user);
+            } catch (moodle_exception $e) {
+                // User may have been enrolled at the same time on login, do not stop the whole synchronisation.
+                $trace->output("error enrolling user $user->id in course $instance->courseid: " . $e->getMessage(), 1);
+                continue;
+            }
+            if ($isenrolled) {
                 $enrolled++;
                 $count++;
                 $trace->output("enrolled user $user->id in course $instance->courseid", 1);
+                if ($limit > 0 && $count >= $limit) {
+                    $trace->output('...enrolment limit reached.', 1);
+                    break;
+                }
             }
         }
-        $rs->close();
-
-        $trace->output("...$enrolled new enrolments.", 1);
 
         return $enrolled;
+    }
+
+    /**
+     * Return the SQL condition to select only users created, modified or logged in since given time.
+     *
+     * @param int $since timestamp, 0 means all users
+     *
+     * @return array SQL condition starting with AND (or empty) and its params
+     */
+    private function get_changed_users_sql($since) {
+        if (empty($since)) {
+            return ['', []];
+        }
+
+        return [
+            "AND (u.timecreated >= :since1 OR u.timemodified >= :since2 OR u.currentlogin >= :since3)",
+            ['since1' => $since, 'since2' => $since, 'since3' => $since],
+        ];
+    }
+
+    /**
+     * Iterate over the users returned by a query in batches of SYNC_BATCH_SIZE.
+     *
+     * No recordset stays open while enrolments are written and only one batch is kept in memory.
+     * The query must return user ids as first field, filter on u.id > :lastid and be ordered by u.id.
+     *
+     * @param string $sql
+     * @param array  $params
+     *
+     * @return \Generator of user records
+     */
+    private function get_users_in_batches($sql, array $params) {
+        global $DB;
+
+        $lastid = 0;
+        do {
+            $users = $DB->get_records_sql($sql, $params + ['lastid' => $lastid], 0, static::SYNC_BATCH_SIZE);
+            foreach ($users as $user) {
+                $lastid = $user->id;
+                yield $user;
+            }
+        } while (count($users) == static::SYNC_BATCH_SIZE);
     }
 
     /**

@@ -240,6 +240,78 @@ final class enrol_matching_users_test extends \advanced_testcase {
     }
 
     /**
+     * Between daily full runs only users created, modified or logged in since last run are processed.
+     */
+    public function test_task_processes_only_changed_users(): void {
+        global $DB;
+
+        $generator = $this->getDataGenerator();
+        $course = $generator->create_course();
+        $instance = $this->add_instance($course, 3, 'Sales');
+        $longago = time() - WEEKSECS;
+        $DB->set_field('enrol', 'timemodified', $longago, ['id' => $instance->id]);
+
+        $user = $generator->create_user(['department' => 'Support']);
+        $DB->update_record('user', (object)['id' => $user->id, 'timecreated' => $longago, 'timemodified' => $longago,
+                                            'currentlogin' => $longago]);
+        $this->run_task();
+        $this->assertFalse($this->is_enrolled_in($instance, $user));
+
+        // Change not tracked by timemodified, as done by direct database updates: wait for the daily full run.
+        $DB->set_field('user', 'department', 'Sales', ['id' => $user->id]);
+        $this->run_task();
+        $this->assertFalse($this->is_enrolled_in($instance, $user));
+
+        // Profile updated through the API: processed on next run.
+        $DB->set_field('user', 'timemodified', time(), ['id' => $user->id]);
+        $this->run_task();
+        $this->assertTrue($this->is_enrolled_in($instance, $user));
+
+        // Daily full run processes every user.
+        $other = $generator->create_user(['department' => 'Sales']);
+        $DB->update_record('user', (object)['id' => $other->id, 'timecreated' => $longago, 'timemodified' => $longago,
+                                            'currentlogin' => $longago]);
+        $this->run_task();
+        $this->assertFalse($this->is_enrolled_in($instance, $other));
+        set_config('matchinguserslastfullsync', time() - DAYSECS, 'enrol_autoenrol');
+        $this->run_task();
+        $this->assertTrue($this->is_enrolled_in($instance, $other));
+    }
+
+    /**
+     * Users are loaded in batches, every user is processed whatever the batch size.
+     */
+    public function test_sync_instance_processes_all_batches(): void {
+        global $CFG, $DB;
+
+        require_once($CFG->dirroot . '/enrol/autoenrol/tests/testable_enrol_autoenrol_plugin.php');
+
+        $generator = $this->getDataGenerator();
+        $course = $generator->create_course();
+        $instance = $this->add_instance($course, 3, 'Sales');
+
+        $users = [];
+        for ($i = 0; $i < 5; $i++) {
+            $users[] = $generator->create_user(['department' => 'Sales']);
+        }
+        $generator->create_user(['department' => 'Support']);
+
+        $plugin = new class extends testable_enrol_autoenrol_plugin {
+            /** @var int Small batches to test batch boundaries */
+            const SYNC_BATCH_SIZE = 2;
+        };
+        $this->assertEquals(5, $plugin->sync_instance(new \null_progress_trace(), $instance));
+        foreach ($users as $user) {
+            $this->assertTrue($this->is_enrolled_in($instance, $user));
+        }
+
+        // Rechecking enrolled users in batches unenrols every user no more matching.
+        $DB->set_field('user', 'department', 'Support', []);
+        $this->assertEquals(0, $plugin->sync_instance(new \null_progress_trace(), $instance));
+        $this->assertEquals(0, $DB->count_records('user_enrolments', ['enrolid' => $instance->id]));
+    }
+
+    /**
      * Instances with other enrol methods are not processed by the task.
      */
     public function test_task_ignores_other_methods(): void {

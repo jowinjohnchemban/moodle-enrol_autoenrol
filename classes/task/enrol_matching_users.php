@@ -30,11 +30,17 @@ namespace enrol_autoenrol\task;
  * Enrols users as soon as they meet the conditions of instances set to enrol on meeting conditions,
  * without waiting for them to log in or to access the course.
  *
+ * Each run processes only users created, modified or logged in since the previous run,
+ * all users are processed once a day and when an instance settings change.
+ *
  * @package   enrol_autoenrol
  * @copyright 2026 Jowin John Chemban
  * @license   http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
  */
 class enrol_matching_users extends \core\task\scheduled_task {
+    /** @var int Seconds of overlap with last run when processing only changed users */
+    const SINCE_OVERLAP = 300;
+
     /**
      * Name for this task.
      *
@@ -63,13 +69,28 @@ class enrol_matching_users extends \core\task\scheduled_task {
 
         $trace = new \text_progress_trace();
 
+        // Usually process only users changed since last run, all users are processed once a day.
+        $starttime = time();
+        $lastsync = (int)get_config('enrol_autoenrol', 'matchinguserslastsync');
+        $lastfullsync = (int)get_config('enrol_autoenrol', 'matchinguserslastfullsync');
+        $fullsync = !empty($courseid) || empty($lastsync) || ($starttime - $lastfullsync >= DAYSECS);
+        // A small overlap with last run covers clock differences between servers.
+        $since = $fullsync ? 0 : $lastsync - self::SINCE_OVERLAP;
+
         $params = ['enrol' => 'autoenrol', 'status' => ENROL_INSTANCE_ENABLED, 'customint1' => 3];
         if (!empty($courseid)) {
             $params['courseid'] = $courseid;
         }
         $instances = $DB->get_records('enrol', $params, 'id');
         foreach ($instances as $instance) {
-            $enrol->sync_instance($trace, $instance);
+            $enrol->sync_instance($trace, $instance, $since);
+        }
+
+        if (empty($courseid)) {
+            set_config('matchinguserslastsync', $starttime, 'enrol_autoenrol');
+            if ($fullsync) {
+                set_config('matchinguserslastfullsync', $starttime, 'enrol_autoenrol');
+            }
         }
 
         $trace->finished();
