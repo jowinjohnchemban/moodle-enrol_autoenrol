@@ -218,6 +218,28 @@ final class enrol_matching_users_test extends \advanced_testcase {
     }
 
     /**
+     * Users that the expirations task unenrols as inactive are not enrolled again by the task.
+     */
+    public function test_task_skips_users_unenrolled_as_inactive(): void {
+        global $DB;
+
+        $generator = $this->getDataGenerator();
+        $course = $generator->create_course();
+        $instance = $this->add_instance($course, 3, 'Sales');
+        $DB->set_field('enrol', 'customint3', 7 * DAYSECS, ['id' => $instance->id]);
+
+        $active = $generator->create_user(['department' => 'Sales', 'lastaccess' => time()]);
+        $neverloggedin = $generator->create_user(['department' => 'Sales', 'lastaccess' => 0]);
+
+        $this->run_task();
+        enrol_get_plugin('autoenrol')->sync_expirations(new \null_progress_trace());
+        $this->run_task();
+
+        $this->assertTrue($this->is_enrolled_in($instance, $active));
+        $this->assertFalse($this->is_enrolled_in($instance, $neverloggedin));
+    }
+
+    /**
      * Instances with other enrol methods are not processed by the task.
      */
     public function test_task_ignores_other_methods(): void {

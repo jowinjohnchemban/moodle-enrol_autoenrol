@@ -117,7 +117,7 @@ $string['messageprovider:expiry_notification'] = 'Autoenrol enrolment expiry not
 $string['method'] = 'Enrol When';
 $string['method_help'] = 'Power users can use this setting to change the plugin\'s behaviour so that users are enrolled to the course upon logging in rather than waiting for them to access the course. This is helpful for courses which should be visible on a users "my courses" list by default.
 
-With "Meeting the conditions" the "Enrol users matching the Autoenrol conditions" scheduled task enrols every active user account that meets the user filter, without any user action. New or changed user accounts are enrolled on the next task run, or on login when "Allow enrolments on login" is enabled, and users that no more match the filter are handled with the "Auto unenrol action" setting.';
+With "Meeting the conditions" the "Enrol users matching the Autoenrol conditions" scheduled task enrols every active user account that meets the user filter, without any user action. New or changed user accounts are enrolled on the next task run, or on login when "Allow enrolments on login" is enabled, and users that no more match the filter are handled with the "Auto unenrol action" setting. When "Unenrol inactive after" is set, users that would be unenrolled as inactive are not enrolled by the task.';
 $string['newenrols'] = 'Allow new auto enrolments';
 $string['newenrols_desc'] = 'Allow users to Autoenrol into new courses by default.';
 $string['newenrols_help'] = 'This setting determines whether a user can enrol into this course.';

@@ -533,6 +533,19 @@ class enrol_autoenrol_plugin extends enrol_plugin {
         $limit = (int)$instance->customint5;
         $count = $DB->count_records('user_enrolments', ['enrolid' => $instance->id]);
 
+        $params = ['guestid' => $CFG->siteguest, 'enrolid' => $instance->id];
+        $inactivesql = '';
+        if (!empty($instance->customint3)) {
+            // Do not enrol users that sync_expirations() would unenrol as inactive, they would be enrolled again on each run.
+            $inactivesql = "AND :now1 - u.lastaccess <= :longtimenosee1
+                            AND NOT EXISTS (SELECT 1
+                                              FROM {user_lastaccess} ul
+                                             WHERE ul.userid = u.id AND ul.courseid = :courseid
+                                                   AND :now2 - ul.timeaccess > :longtimenosee2)";
+            $params += ['now1' => $now, 'now2' => $now, 'courseid' => $instance->courseid,
+                        'longtimenosee1' => $instance->customint3, 'longtimenosee2' => $instance->customint3];
+        }
+
         // Now enrol all active users not yet enrolled with this instance that meet the conditions.
         $sql = "SELECT u.*
                   FROM {user} u
@@ -540,8 +553,9 @@ class enrol_autoenrol_plugin extends enrol_plugin {
                        AND NOT EXISTS (SELECT 1
                                          FROM {user_enrolments} ue
                                         WHERE ue.userid = u.id AND ue.enrolid = :enrolid)
+                       $inactivesql
               ORDER BY u.id";
-        $rs = $DB->get_recordset_sql($sql, ['guestid' => $CFG->siteguest, 'enrolid' => $instance->id]);
+        $rs = $DB->get_recordset_sql($sql, $params);
         $enrolled = 0;
         foreach ($rs as $user) {
             if ($limit > 0 && $count >= $limit) {
