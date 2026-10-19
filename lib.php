@@ -436,7 +436,7 @@ class enrol_autoenrol_plugin extends enrol_plugin {
     /**
      * Check if an enrolled user still matches the instance rule and update the enrolment.
      *
-     * Users that no more match the rule are unenrolled or suspended as defined by autounenrolaction setting,
+     * Users that no more match the rule are unenrolled, kept or suspended as defined by autounenrolaction setting,
      * users that match the rule are unsuspended (if allowed) and their group membership is updated.
      *
      * @param stdClass $instance       enrol instance

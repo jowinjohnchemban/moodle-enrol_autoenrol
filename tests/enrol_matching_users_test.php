@@ -139,6 +139,85 @@ final class enrol_matching_users_test extends \advanced_testcase {
     }
 
     /**
+     * Data provider for test_task_applies_autounenrolaction.
+     *
+     * @return array
+     */
+    public static function autounenrolaction_provider(): array {
+        return [
+            'unenrol' => [ENROL_EXT_REMOVED_UNENROL, false, null, false],
+            'keep' => [ENROL_EXT_REMOVED_KEEP, true, ENROL_USER_ACTIVE, true],
+            'suspend' => [ENROL_EXT_REMOVED_SUSPEND, true, ENROL_USER_SUSPENDED, true],
+            'suspend no roles' => [ENROL_EXT_REMOVED_SUSPENDNOROLES, true, ENROL_USER_SUSPENDED, false],
+        ];
+    }
+
+    /**
+     * Users no more matching the conditions are handled as set in autounenrolaction.
+     *
+     * @dataProvider autounenrolaction_provider
+     * @param int $action autounenrolaction setting
+     * @param bool $enrolled expected enrolment existence
+     * @param int|null $status expected enrolment status
+     * @param bool $hasrole expected role assignment existence
+     */
+    public function test_task_applies_autounenrolaction(int $action, bool $enrolled, ?int $status, bool $hasrole): void {
+        global $DB;
+
+        set_config('autounenrolaction', $action, 'enrol_autoenrol');
+
+        $generator = $this->getDataGenerator();
+        $course = $generator->create_course();
+        $instance = $this->add_instance($course, 3, 'Sales');
+        $context = \context_course::instance($course->id);
+
+        $user = $generator->create_user(['department' => 'Sales']);
+        $this->run_task();
+        $this->assertTrue($this->is_enrolled_in($instance, $user));
+
+        $DB->set_field('user', 'department', 'Support', ['id' => $user->id]);
+        $this->run_task();
+
+        $this->assertSame($enrolled, $this->is_enrolled_in($instance, $user));
+        if ($enrolled) {
+            $ue = $DB->get_record('user_enrolments', ['enrolid' => $instance->id, 'userid' => $user->id]);
+            $this->assertEquals($status, $ue->status);
+        }
+        $this->assertSame($hasrole, $DB->record_exists('role_assignments', [
+            'contextid' => $context->id,
+            'userid' => $user->id,
+            'component' => 'enrol_autoenrol',
+            'itemid' => $instance->id,
+        ]));
+    }
+
+    /**
+     * Suspended enrolments are reactivated when the user matches again and unsuspension is allowed.
+     */
+    public function test_task_unsuspends_matching_users(): void {
+        global $DB;
+
+        set_config('autounenrolaction', ENROL_EXT_REMOVED_SUSPEND, 'enrol_autoenrol');
+        set_config('allowunsuspend', 1, 'enrol_autoenrol');
+
+        $generator = $this->getDataGenerator();
+        $course = $generator->create_course();
+        $instance = $this->add_instance($course, 3, 'Sales');
+
+        $user = $generator->create_user(['department' => 'Sales']);
+        $params = ['enrolid' => $instance->id, 'userid' => $user->id];
+        $this->run_task();
+
+        $DB->set_field('user', 'department', 'Support', ['id' => $user->id]);
+        $this->run_task();
+        $this->assertEquals(ENROL_USER_SUSPENDED, $DB->get_field('user_enrolments', 'status', $params));
+
+        $DB->set_field('user', 'department', 'Sales', ['id' => $user->id]);
+        $this->run_task();
+        $this->assertEquals(ENROL_USER_ACTIVE, $DB->get_field('user_enrolments', 'status', $params));
+    }
+
+    /**
      * Instances with other enrol methods are not processed by the task.
      */
     public function test_task_ignores_other_methods(): void {
